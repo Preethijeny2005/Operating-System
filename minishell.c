@@ -1,11 +1,10 @@
 /*********************************************************************
-Program : miniShell 
-Version : 1.3
+Program : miniShell Version : 1.3
 --------------------------------------------------------------------
-Minimal command line interpreter with background jobs
+Simple skeleton code for Linux/Unix command line interpreter
 --------------------------------------------------------------------
 File : minishell.c
-Compiler/System : gcc/linux, should also run on macOS
+Compiler/System : gcc/linux
 ********************************************************************/
 
 #include <sys/types.h>
@@ -17,119 +16,123 @@ Compiler/System : gcc/linux, should also run on macOS
 #include <signal.h>
 #include <errno.h>
 
-#define NV 20   /* max number of command tokens */
-#define NL 100  /* max input line length */
 
-typedef struct job {
-    int id;
+#define NV 20     /* max number of command tokens */
+#define NLIN 1024 /* max command line size */
+
+struct job {
     pid_t pid;
-    char cmd[NL];
+    char cmd[NLIN];
     struct job *next;
-} Job;
+};
 
-Job *jobs = NULL;
-int job_counter = 1;
+struct job *jobs = NULL;
 
-/* --- Utility: Add job to list --- */
-void add_job(pid_t pid, const char *cmd) {
-    Job *j = malloc(sizeof(Job));
-    j->id = job_counter++;
-    j->pid = pid;
-    strncpy(j->cmd, cmd, NL - 1);
-    j->cmd[NL - 1] = '\0';
-    j->next = jobs;
-    jobs = j;
-    printf("[%d] %d\n", j->id, j->pid);
-    fflush(stdout);
-}
-
-/* --- Utility: Remove job once finished --- */
-void remove_job(pid_t pid, int status) {
-    Job **prev = &jobs;
-    Job *curr = jobs;
-    while (curr) {
-        if (curr->pid == pid) {
-            printf("[%d]+ Done                 %s\n", curr->id, curr->cmd);
-            fflush(stdout);
-            *prev = curr->next;
-            free(curr);
+/* remove finished job */
+void remove_job(pid_t pid) {
+    struct job **cur = &jobs;
+    while (*cur) {
+        if ((*cur)->pid == pid) {
+            struct job *tmp = *cur;
+            *cur = (*cur)->next;
+            free(tmp);
             return;
         }
-        prev = &curr->next;
-        curr = curr->next;
+        cur = &((*cur)->next);
     }
 }
 
-/* --- Reap background processes --- */
+/* reap children when they exit */
 void sigchld_handler(int sig) {
-    int saved_errno = errno;
-    pid_t pid;
     int status;
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        remove_job(pid, status);
-    }
-    errno = saved_errno;
-}
+    pid_t pid;
 
-/* --- Parse input line into argv[] --- */
-int parse_line(char *line, char *argv[]) {
-    int argc = 0;
-    char *token = strtok(line, " \t\n");
-    while (token && argc < NV - 1) {
-        argv[argc++] = token;
-        token = strtok(NULL, " \t\n");
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        struct job *cur = jobs;
+        while (cur) {
+            if (cur->pid == pid) {
+                printf("[#]+ Done                 %s\n", cur->cmd);
+                fflush(stdout);
+                remove_job(pid);
+                break;
+            }
+            cur = cur->next;
+        }
     }
-    argv[argc] = NULL;
-    return argc;
 }
 
 int main() {
-    char line[NL];
+    char line[NLIN];
     char *argv[NV];
-    struct sigaction sa;
+    char *p;
+    int background;
 
-    sa.sa_handler = sigchld_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-    sigaction(SIGCHLD, &sa, NULL);
+    signal(SIGCHLD, sigchld_handler);
 
     while (1) {
-        printf(" msh> ");
+        /* prompt */
+        printf("miniShell> ");
         fflush(stdout);
 
-        if (!fgets(line, NL, stdin))
-            break;
-
-        if (line[0] == '\n')
-            continue;
-
-        int argc = parse_line(line, argv);
-        if (argc == 0)
-            continue;
-
-        int background = 0;
-        if (strcmp(argv[argc - 1], "&") == 0) {
-            background = 1;
-            argv[argc - 1] = NULL;
+        if (!fgets(line, NLIN, stdin)) {
+            break; /* EOF */
         }
 
-        if (strcmp(argv[0], "exit") == 0)
+        /* strip newline */
+        line[strcspn(line, "\n")] = 0;
+
+        /* check empty input */
+        if (strlen(line) == 0) continue;
+
+        /* tokenize */
+        int argc = 0;
+        background = 0;
+        p = strtok(line, " ");
+        while (p != NULL && argc < NV-1) {
+            if (strcmp(p, "&") == 0) {
+                background = 1;
+            } else {
+                argv[argc++] = p;
+            }
+            p = strtok(NULL, " ");
+        }
+        argv[argc] = NULL;
+
+        if (argc == 0) continue;
+
+        /* builtin exit */
+        if (strcmp(argv[0], "exit") == 0) {
             break;
+        }
 
         pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            continue;
+        }
+
         if (pid == 0) {
+            /* child */
             execvp(argv[0], argv);
             perror("execvp");
             exit(1);
-        } else if (pid > 0) {
+        } else {
+            /* parent */
             if (background) {
-                add_job(pid, argv[0]);
+                /* add to jobs list */
+                struct job *newjob = malloc(sizeof(struct job));
+                newjob->pid = pid;
+                snprintf(newjob->cmd, sizeof(newjob->cmd), "%s", argv[0]);
+                newjob->next = jobs;
+                jobs = newjob;
+
+                printf("[#] %d\n", pid);
+                fflush(stdout);
             } else {
                 waitpid(pid, NULL, 0);
             }
-        } else {
-            perror("fork");
         }
     }
+
     return 0;
 }
