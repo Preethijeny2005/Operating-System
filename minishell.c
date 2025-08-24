@@ -1,12 +1,10 @@
 /*********************************************************************
-Program : miniShell
---------------------------------------------------------------------
-Simple skeleton code for a Linux/Unix/MINIX command line interpreter
---------------------------------------------------------------------
-File : minishell.c
-Compiler/System : gcc/linux
-********************************************************************/
+ Program : miniShell (Task 2 Upgraded)
+ Author  : Your Name
+ Purpose : Minimal POSIX shell with background jobs, cd, robust errors
+*********************************************************************/
 
+#define _POSIX_C_SOURCE 200809L
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <stdio.h>
@@ -15,96 +13,231 @@ Compiler/System : gcc/linux
 #include <stdlib.h>
 #include <signal.h>
 #include <errno.h>
-#include <ctype.h>
 
-#define NV 20    /* max number of command tokens */
-#define NL 100   /* max number of characters per line */
+#define NV  64   /* max number of command tokens */
+#define NL  256  /* input buffer size */
+#define MAX_JOBS 128
 
-void execute(char *argv[], int bg) {
-    pid_t pid = fork();
+static char line[NL]; /* command input buffer */
 
-    if (pid < 0) {
-        perror("fork");
-        return;
-    } else if (pid == 0) {
-        // Child process
-        execvp(argv[0], argv);
-        perror("execvp");
-        exit(1);
-    } else {
-        // Parent process
-        if (!bg) {
-            int status;
-            waitpid(pid, &status, 0);
-        } else {
-            printf("[#] %d\n", pid);
+/* ----------------------------- Jobs -------------------------------- */
+
+typedef struct {
+    int   id;                 /* job number starting at 1 */
+    pid_t pid;                /* child pid */
+    int   active;             /* 1 if running */
+    char  cmdline[NL];        /* printable command */
+} job_t;
+
+static job_t jobs[MAX_JOBS];
+static int job_count = 0;
+
+/* find job by pid */
+static int find_job_index(pid_t pid) {
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (jobs[i].active && jobs[i].pid == pid) return i;
+    }
+    return -1;
+}
+
+/* add job, returns job index or -1 */
+static int add_job(pid_t pid, const char *cmdline) {
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (!jobs[i].active) {
+            jobs[i].active = 1;
+            jobs[i].pid = pid;
+            jobs[i].id = ++job_count;
+            snprintf(jobs[i].cmdline, sizeof(jobs[i].cmdline), "%s", cmdline);
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* reap any finished background children and print completion lines */
+static void reap_background_finished(void) {
+    int status;
+    while (1) {
+        pid_t p = waitpid(-1, &status, WNOHANG);
+        if (p == 0) break;        /* no more finished children */
+        if (p == -1) {
+            if (errno == ECHILD) break; /* no children at all */
+            perror("waitpid");          /* system call error */
+            break;
+        }
+        int idx = find_job_index(p);
+        if (idx >= 0) {
+            /* expected format: [#]+ Done <cmd> */
+            printf("[%d]+ Done                 %s\n", jobs[idx].id, jobs[idx].cmdline);
+            fflush(stdout);
+            jobs[idx].active = 0;
         }
     }
 }
 
-int main() {
-    char line[NL];
-    char *argv[NV];
-    int bg;
+/* on EOF (non-interactive), wait for remaining background jobs */
+static void wait_for_all_background(void) {
+    int any_active = 0;
+    for (int i = 0; i < MAX_JOBS; i++) if (jobs[i].active) { any_active = 1; break; }
+    if (!any_active) return;
 
-    while (1) {
-        // Show prompt only if interactive
-        if (isatty(STDIN_FILENO)) {
-            printf("myshell> ");
+    int status;
+    pid_t p;
+    while ((p = waitpid(-1, &status, 0)) != -1) {
+        int idx = find_job_index(p);
+        if (idx >= 0) {
+            printf("[%d]+ Done                 %s\n", jobs[idx].id, jobs[idx].cmdline);
             fflush(stdout);
+            jobs[idx].active = 0;
         }
+    }
+    if (errno != ECHILD) perror("waitpid");
+}
 
-        if (fgets(line, NL, stdin) == NULL) {
-            // Ctrl-D or EOF
-            break;
+/* --------------------------- Utilities ------------------------------ */
+
+/* Prompt: disabled for non-interactive tests */
+static void prompt(void) {
+    fflush(stdout);
+}
+
+/* build a single string from argv tokens */
+static void build_cmdline(char **v, int argc, char *out, size_t outsz) {
+    out[0] = '\0';
+    for (int i = 0; i < argc; i++) {
+        size_t len = strlen(out);
+        if (len + strlen(v[i]) + 2 < outsz) {
+            if (i) strncat(out, " ", outsz - strlen(out) - 1);
+            strncat(out, v[i], outsz - strlen(out) - 1);
         }
+    }
+}
 
-        // Remove newline
-        line[strcspn(line, "\n")] = '\0';
+/* ---------------------------- Builtins ------------------------------ */
 
-        if (strlen(line) == 0) {
-            continue;
+/* change directory: supports cd, cd ~, cd <path> */
+static int builtin_cd(char **argv) {
+    const char *target = argv[1];
+
+    if (!target) {
+        /* no argument: go to HOME */
+        target = getenv("HOME");
+        if (!target) {
+            fprintf(stderr, "cd: HOME not set\n");
+            return -1;
         }
-
-        // Tokenize input
-        int argc = 0;
-        char *token = strtok(line, " ");
-        while (token != NULL && argc < NV - 1) {
-            argv[argc++] = token;
-            token = strtok(NULL, " ");
+    } else if (target[0] == '~') {
+        /* expand ~ to HOME */
+        const char *home = getenv("HOME");
+        if (!home) {
+            fprintf(stderr, "cd: HOME not set\n");
+            return -1;
         }
-        argv[argc] = NULL;
+        static char expanded[NL];
+        snprintf(expanded, sizeof(expanded), "%s%s", home, target + 1);
+        target = expanded;
+    }
 
-        if (argc == 0) continue;
-
-        // Check background
-        bg = 0;
-        if (strcmp(argv[argc - 1], "&") == 0) {
-            bg = 1;
-            argv[argc - 1] = NULL;
-        }
-
-        // Built-in: exit
-        if (strcmp(argv[0], "exit") == 0) {
-            break;
-        }
-
-        // Built-in: cd
-        if (strcmp(argv[0], "cd") == 0) {
-            if (argc < 2) {
-                fprintf(stderr, "cd: missing argument\n");
-            } else if (chdir(argv[1]) != 0) {
-                perror("cd");
-            }
-            continue;
-        }
-
-        // Execute external command
-        execute(argv, bg);
-
-        // Reap background processes
-        while (waitpid(-1, NULL, WNOHANG) > 0);
+    if (chdir(target) == -1) {
+        fprintf(stderr, "cd: %s: %s\n", target, strerror(errno));
+        return -1;
     }
 
     return 0;
+}
+
+/* ----------------------------- Main -------------------------------- */
+
+int main(void) {
+    char *v[NV];                /* token vector */
+    const char *sep = " \t\n";  /* separators */
+
+    /* ignore SIGINT in the parent so ^C hits children */
+    struct sigaction sa = {0};
+    sa.sa_handler = SIG_IGN;
+    if (sigaction(SIGINT, &sa, NULL) == -1) perror("sigaction");
+
+    while (1) {
+        prompt();
+
+        if (fgets(line, NL, stdin) == NULL) {
+            /* EOF or error */
+            if (ferror(stdin)) perror("fgets");
+            wait_for_all_background();
+            exit(0);
+        }
+
+        /* skip empty lines and comments */
+        if (line[0] == '\n' || line[0] == '\0' || line[0] == '#') {
+            reap_background_finished();
+            continue;
+        }
+
+        /* tokenize line by separators */
+        v[0] = strtok(line, sep);
+        if (!v[0]) { reap_background_finished(); continue; }
+        int argc = 1;
+        for (; argc < NV; argc++) {
+            v[argc] = strtok(NULL, sep);
+            if (!v[argc]) break;
+        }
+
+        /* handle builtins (no fork) */
+        if (strcmp(v[0], "cd") == 0) {
+            builtin_cd(v);
+            reap_background_finished();
+            continue;
+        }
+
+        /* detect background '&' at end */
+        int background = 0;
+        if (argc > 0 && v[argc - 1] && strcmp(v[argc - 1], "&") == 0) {
+            background = 1;
+            v[argc - 1] = NULL;
+            argc--;
+        }
+
+        /* build printable command line for jobs */
+        char printable[NL];
+        build_cmdline(v, argc, printable, sizeof(printable));
+
+        /* fork and execute */
+        pid_t pid = fork();
+        if (pid == -1) {
+            perror("fork");
+            reap_background_finished();
+            continue;
+        }
+
+        if (pid == 0) {
+            /* child: restore default SIGINT */
+            struct sigaction sc = {0};
+            sc.sa_handler = SIG_DFL;
+            if (sigaction(SIGINT, &sc, NULL) == -1) perror("sigaction");
+
+            execvp(v[0], v);
+            perror("execvp");
+            _exit(127);
+        }
+
+        /* parent */
+        if (background) {
+            int idx = add_job(pid, printable);
+            if (idx == -1) {
+                fprintf(stderr, "jobs table full; running in foreground\n");
+                int status;
+                if (waitpid(pid, &status, 0) == -1) perror("waitpid");
+            } else {
+                /* print job start line for background processes */
+                printf("[%d] %d\n", jobs[idx].id, jobs[idx].pid);
+                fflush(stdout);
+            }
+        } else {
+            /* foreground: wait until it finishes */
+            int status;
+            if (waitpid(pid, &status, 0) == -1) perror("waitpid");
+        }
+
+        reap_background_finished();
+    }
 }
