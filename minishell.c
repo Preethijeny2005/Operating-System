@@ -220,8 +220,8 @@ int main(void) {
                 if (waitpid(pid, &status, 0) == -1) perror("waitpid");
             } else {
                 /* expected start line: [#] PID */
-                printf("[%d] %d\n", jobs[idx].id, jobs[idx].pid);
-                fflush(stdout);
+                //printf("[%d] %d\n", jobs[idx].id, jobs[idx].pid);
+                //fflush(stdout);
             }
         } else {
             /* foreground: wait until it finishes */
