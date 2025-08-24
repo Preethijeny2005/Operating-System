@@ -1,8 +1,18 @@
 /*********************************************************************
- Program : miniShell (Task 2 Upgraded)
- Author  : Your Name
- Purpose : Minimal POSIX shell with background jobs, cd, robust errors
-*********************************************************************/
+Program : miniShell Version : 1.3
+--------------------------------------------------------------------
+skeleton code for linix/unix/minix command line interpreter
+--------------------------------------------------------------------
+File : minishell.c
+Compiler/System : gcc/linux
+********************************************************************/
+
+// Modify that minishell to do the following:
+
+// put commands ended by an “&”  into background mode and report when they have finish (not when they run immediately). 
+// properly interpret the shell cd command (i.e., change directory correctly)
+// include an appropriate perror statement after each and every system call.
+// fix the minishell so that if the exec system call fails, the child process is correctly terminated.
 
 #define _POSIX_C_SOURCE 200809L
 #include <sys/types.h>
@@ -18,9 +28,18 @@
 #define NL  256  /* input buffer size */
 #define MAX_JOBS 128
 
+// void prompt(void)
+// {
+// // ## REMOVE THIS 'fprintf' STATEMENT BEFORE SUBMISSION
+// fprintf(stdout, "\n msh> ");
+// fflush(stdout);
+// }
+
+
 static char line[NL]; /* command input buffer */
 
-/* ----------------------------- Jobs -------------------------------- */
+// Jobs - need to keep track of background jobs
+// Told the process started with '&' is a background job
 
 typedef struct {
     int   id;                 /* job number starting at 1 */
@@ -67,7 +86,7 @@ static void reap_background_finished(void) {
         }
         int idx = find_job_index(p);
         if (idx >= 0) {
-            /* expected format: [#]+ Done <cmd> */
+            // Deleted expected formt from here 
             printf("[%d]+ Done                 %s\n", jobs[idx].id, jobs[idx].cmdline);
             fflush(stdout);
             jobs[idx].active = 0;
@@ -75,7 +94,7 @@ static void reap_background_finished(void) {
     }
 }
 
-/* on EOF (non-interactive), wait for remaining background jobs */
+/* Wait foer all background jobs before exiting (EOF) */
 static void wait_for_all_background(void) {
     int any_active = 0;
     for (int i = 0; i < MAX_JOBS; i++) if (jobs[i].active) { any_active = 1; break; }
@@ -94,7 +113,7 @@ static void wait_for_all_background(void) {
     if (errno != ECHILD) perror("waitpid");
 }
 
-/* --------------------------- Utilities ------------------------------ */
+// Utilities
 
 /* Prompt: disabled for non-interactive tests */
 static void prompt(void) {
@@ -113,7 +132,7 @@ static void build_cmdline(char **v, int argc, char *out, size_t outsz) {
     }
 }
 
-/* ---------------------------- Builtins ------------------------------ */
+// Builtins 
 
 /* change directory: supports cd, cd ~, cd <path> */
 static int builtin_cd(char **argv) {
@@ -127,7 +146,7 @@ static int builtin_cd(char **argv) {
             return -1;
         }
     } else if (target[0] == '~') {
-        /* expand ~ to HOME */
+        // expand ~ to HOME
         const char *home = getenv("HOME");
         if (!home) {
             fprintf(stderr, "cd: HOME not set\n");
@@ -146,7 +165,7 @@ static int builtin_cd(char **argv) {
     return 0;
 }
 
-/* ----------------------------- Main -------------------------------- */
+// Main 
 
 int main(void) {
     char *v[NV];                /* token vector */
@@ -160,6 +179,8 @@ int main(void) {
     while (1) {
         prompt();
 
+        /* Get user input */
+        /* If EOF, wait for background jobs and exit */
         if (fgets(line, NL, stdin) == NULL) {
             /* EOF or error */
             if (ferror(stdin)) perror("fgets");
